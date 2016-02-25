@@ -542,7 +542,7 @@ def _human_to_bytes(number):
             return int(number[:-len(each)]) * (1024 ** i)
         i = i + 1
 
-    raise ValueError('Could not convert %s to integer' % (number,))
+    return int(number)
 
 
 def _ansible_facts(container_list):
@@ -1774,7 +1774,7 @@ def main():
             devices         = dict(default=None, type='list'),
             memory_limit    = dict(default=0),
             memory_swap     = dict(default=0),
-            cpu_shares      = dict(default=0),
+            cpu_shares      = dict(default=0, type='int'),
             docker_url      = dict(),
             use_tls         = dict(default=None, choices=['no', 'encrypt', 'verify']),
             tls_client_cert = dict(required=False, default=None, type='str'),
