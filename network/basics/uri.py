@@ -190,7 +190,7 @@ EXAMPLES = '''
 # access the app in later tasks
 
 - uri:
-    url: https://your.form.based.auth.examle.com/index.php
+    url: https://your.form.based.auth.example.com/index.php
     method: POST
     body: "name=your_username&password=your_password&enter=Sign%20in"
     status_code: 302
@@ -298,12 +298,16 @@ def uri(module, url, dest, body, body_format, method, headers, socket_timeout):
     redir_info = {}
     r = {}
     if dest is not None:
+        # Stash follow_redirects, in this block we don't want to follow
+        # we'll reset back to the supplied value soon
+        follow_redirects = module.params['follow_redirects']
+        module.params['follow_redirects'] = False
         dest = os.path.expanduser(dest)
         if os.path.isdir(dest):
             # first check if we are redirected to a file download
             _, redir_info = fetch_url(module, url, data=body,
                                       headers=headers,
-                                      method=method, follow_redirects=None,
+                                      method=method,
                                       timeout=socket_timeout)
             # if we are redirected, update the url with the location header,
             # and update dest with the new url filename
@@ -316,6 +320,9 @@ def uri(module, url, dest, body, body_format, method, headers, socket_timeout):
             t = datetime.datetime.utcfromtimestamp(os.path.getmtime(dest))
             tstamp = t.strftime('%a, %d %b %Y %H:%M:%S +0000')
             headers['If-Modified-Since'] = tstamp
+
+        # Reset follow_redirects back to the stashed value
+        module.params['follow_redirects'] = follow_redirects
 
     resp, info = fetch_url(module, url, data=body, headers=headers,
                            method=method, timeout=socket_timeout)
@@ -335,7 +342,7 @@ def main():
         dest = dict(required=False, default=None, type='path'),
         url_username = dict(required=False, default=None, aliases=['user']),
         url_password = dict(required=False, default=None, aliases=['password']),
-        body = dict(required=False, default=None),
+        body = dict(required=False, default=None, type='raw'),
         body_format = dict(required=False, default='raw', choices=['raw', 'json']),
         method = dict(required=False, default='GET', choices=['GET', 'POST', 'PUT', 'HEAD', 'DELETE', 'OPTIONS', 'PATCH', 'TRACE', 'CONNECT', 'REFRESH']),
         return_content = dict(required=False, default='no', type='bool'),
