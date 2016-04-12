@@ -601,12 +601,26 @@ def submodule_update(git_path, module, dest, track_submodules):
         module.fail_json(msg="Failed to init/update submodules: %s" % out + err)
     return (rc, out, err)
 
+def set_remote_branch(git_path, module, dest, remote, version, depth):
+    cmd = "%s remote set-branches %s %s" % (git_path, remote, version)
+    (rc, out, err) = module.run_command(cmd, cwd=dest)
+    if rc != 0:
+        module.fail_json(msg="Failed to set remote branch: %s" % version)
+    cmd = "%s fetch --depth=%s %s %s" % (git_path, depth, remote, version)
+    (rc, out, err) = module.run_command(cmd, cwd=dest)
+    if rc != 0:
+        module.fail_json(msg="Failed to fetch branch from remote: %s" % version)
 
 def switch_version(git_path, module, dest, remote, version, verify_commit):
     cmd = ''
     if version != 'HEAD':
         if is_remote_branch(git_path, module, dest, remote, version):
             if not is_local_branch(git_path, module, dest, version):
+                depth = module.params['depth']
+                if depth:
+                    # git clone --depth implies --single-branch, which makes
+                    # the checkout fail if the version changes
+                    set_remote_branch(git_path, module, dest, remote, version, depth)
                 cmd = "%s checkout --track -b %s %s/%s" % (git_path, version, remote, version)
             else:
                 (rc, out, err) = module.run_command("%s checkout --force %s" % (git_path, version), cwd=dest)
@@ -646,7 +660,7 @@ def verify_commit_sign(git_path, module, dest, version):
 def main():
     module = AnsibleModule(
         argument_spec = dict(
-            dest=dict(),
+            dest=dict(type='path'),
             repo=dict(required=True, aliases=['name']),
             version=dict(default='HEAD'),
             remote=dict(default='origin'),
@@ -658,9 +672,9 @@ def main():
             update=dict(default='yes', type='bool'),
             verify_commit=dict(default='no', type='bool'),
             accept_hostkey=dict(default='no', type='bool'),
-            key_file=dict(default=None, required=False),
+            key_file=dict(default=None, type='path', required=False),
             ssh_opts=dict(default=None, required=False),
-            executable=dict(default=None),
+            executable=dict(default=None, type='path'),
             bare=dict(default='no', type='bool'),
             recursive=dict(default='yes', type='bool'),
             track_submodules=dict(default='no', type='bool'),
@@ -692,15 +706,11 @@ def main():
     if not dest and allow_clone:
         module.fail_json(msg="the destination directory must be specified unless clone=no")
     elif dest:
-        dest = os.path.abspath(os.path.expanduser(dest))
+        dest = os.path.abspath(dest)
         if bare:
             gitconfig = os.path.join(dest, 'config')
         else:
             gitconfig = os.path.join(dest, '.git', 'config')
-
-    # make sure the key_file path is expanded for ~ and $HOME
-    if key_file is not None:
-        key_file = os.path.abspath(os.path.expanduser(key_file))
 
     # create a wrapper script and export
     # GIT_SSH=<path> as an environment variable

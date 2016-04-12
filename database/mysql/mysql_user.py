@@ -69,6 +69,13 @@ options:
     choices: [ "yes", "no" ]
     default: "no"
     version_added: "1.4"
+  sql_log_bin:
+    description:
+      - Whether binary logging should be enabled or disabled for the connection.
+    required: false
+    choices: ["yes", "no" ]
+    default: "yes"
+    version_added: "2.1"
   state:
     description:
       - Whether the user should exist.  When C(absent), removes
@@ -138,6 +145,9 @@ mydb.*:INSERT,UPDATE/anotherdb.*:SELECT/yetanotherdb.*:ALL
 
 # Example using login_unix_socket to connect to server
 - mysql_user: name=root password=abc123 login_unix_socket=/var/run/mysqld/mysqld.sock
+
+# Example of skipping binary logging while adding user 'bob'
+- mysql_user: name=bob password=12345 priv=*.*:USAGE state=present sql_log_bin=no
 
 # Example .my.cnf file for setting the root password
 
@@ -464,7 +474,7 @@ def main():
     module = AnsibleModule(
         argument_spec = dict(
             login_user=dict(default=None),
-            login_password=dict(default=None),
+            login_password=dict(default=None, no_log=True),
             login_host=dict(default="localhost"),
             login_port=dict(default=3306, type='int'),
             login_unix_socket=dict(default=None),
@@ -478,10 +488,12 @@ def main():
             append_privs=dict(default=False, type='bool'),
             check_implicit_admin=dict(default=False, type='bool'),
             update_password=dict(default="always", choices=["always", "on_create"]),
-            config_file=dict(default="~/.my.cnf"),
-            ssl_cert=dict(default=None),
-            ssl_key=dict(default=None),
-            ssl_ca=dict(default=None),
+            connect_timeout=dict(default=30, type='int'),
+            config_file=dict(default="~/.my.cnf", type='path'),
+            sql_log_bin=dict(default=True, type='bool'),
+            ssl_cert=dict(default=None, type='path'),
+            ssl_key=dict(default=None, type='path'),
+            ssl_ca=dict(default=None, type='path'),
         ),
         supports_check_mode=True
     )
@@ -495,6 +507,7 @@ def main():
     state = module.params["state"]
     priv = module.params["priv"]
     check_implicit_admin = module.params['check_implicit_admin']
+    connect_timeout = module.params['connect_timeout']
     config_file = module.params['config_file']
     append_privs = module.boolean(module.params["append_privs"])
     update_password = module.params['update_password']
@@ -502,8 +515,8 @@ def main():
     ssl_key = module.params["ssl_key"]
     ssl_ca = module.params["ssl_ca"]
     db = 'mysql'
+    sql_log_bin = module.params["sql_log_bin"]
 
-    config_file = os.path.expanduser(os.path.expandvars(config_file))
     if not mysqldb_found:
         module.fail_json(msg="the python mysqldb module is required")
 
@@ -511,14 +524,19 @@ def main():
     try:
         if check_implicit_admin:
             try:
-                cursor = mysql_connect(module, 'root', '', config_file, ssl_cert, ssl_key, ssl_ca, db)
+                cursor = mysql_connect(module, 'root', '', config_file, ssl_cert, ssl_key, ssl_ca, db,
+                                       connect_timeout=connect_timeout)
             except:
                 pass
 
         if not cursor:
-            cursor = mysql_connect(module, login_user, login_password, config_file, ssl_cert, ssl_key, ssl_ca, db)
+            cursor = mysql_connect(module, login_user, login_password, config_file, ssl_cert, ssl_key, ssl_ca, db,
+                                   connect_timeout=connect_timeout)
     except Exception, e:
         module.fail_json(msg="unable to connect to database, check login_user and login_password are correct or %s has the credentials. Exception message: %s" % (config_file, e))
+
+    if not sql_log_bin:
+        cursor.execute("SET SQL_LOG_BIN=0;")
 
     if priv is not None:
         try:

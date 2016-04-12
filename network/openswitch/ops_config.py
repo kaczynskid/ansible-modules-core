@@ -15,19 +15,19 @@
 # You should have received a copy of the GNU General Public License
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 #
+
 DOCUMENTATION = """
 ---
-module: eos_config
+module: ops_config
 version_added: "2.1"
-author: "Peter Sprygada (@privateip)"
-short_description: Manage Arista EOS configuration sections
+author: "Peter sprygada (@privateip)"
+short_description: Manage OpenSwitch configuration using CLI
 description:
-  - Arista EOS configurations use a simple block indent file sytanx
+  - OpenSwitch configurations use a simple block indent file sytanx
     for segementing configuration into sections.  This module provides
-    an implementation for working with eos configuration sections in
-    a deterministic way.  This module works with either CLI or eapi
-    transports.
-extends_documentation_fragment: eos
+    an implementation for working with ops configuration sections in
+    a deterministic way.
+extends_documentation_fragment: openswitch
 options:
   lines:
     description:
@@ -92,7 +92,7 @@ options:
         without first checking if already configured.
     required: false
     default: false
-    choices: ['yes', 'no']
+    choices: ['true', 'false']
   config:
     description:
       - The module, by default, will connect to the remote device and
@@ -107,30 +107,17 @@ options:
 """
 
 EXAMPLES = """
-- eos_config:
-    lines: ['hostname {{ inventory_hostname }}']
-    force: yes
+- name: configure hostname over cli
+  ops_config:
+  lines:
+    - "hostname {{ inventory_hostname }}"
 
-- eos_config:
-    lines:
-      - 10 permit ip 1.1.1.1/32 any log
-      - 20 permit ip 2.2.2.2/32 any log
-      - 30 permit ip 3.3.3.3/32 any log
-      - 40 permit ip 4.4.4.4/32 any log
-      - 50 permit ip 5.5.5.5/32 any log
-    parents: ['ip access-list test']
-    before: ['no ip access-list test']
-    match: exact
-
-- eos_config:
-    lines:
-      - 10 permit ip 1.1.1.1/32 any log
-      - 20 permit ip 2.2.2.2/32 any log
-      - 30 permit ip 3.3.3.3/32 any log
-      - 40 permit ip 4.4.4.4/32 any log
-    parents: ['ip access-list test']
-    before: ['no ip access-list test']
-    replace: block
+- name: configure vlan 10 over cli
+  ops_config:
+  lines:
+    - no shutdown
+  parents:
+    - vlan 10
 """
 
 RETURN = """
@@ -142,10 +129,12 @@ updates:
 
 responses:
   description: The set of responses from issuing the commands on the device
-  retured: always
+  retured: when not check_mode
   type: list
   sample: ['...', '...']
 """
+import re
+import itertools
 
 def get_config(module):
     config = module.params['config'] or dict()
@@ -153,9 +142,35 @@ def get_config(module):
         config = module.config
     return config
 
+def build_candidate(lines, parents, config, strategy):
+    candidate = list()
+
+    if strategy == 'strict':
+        for index, cmd in enumerate(lines):
+            try:
+                if cmd != config[index]:
+                    candidate.append(cmd)
+            except IndexError:
+                candidate.append(cmd)
+
+    elif strategy == 'exact':
+        if len(lines) != len(config):
+            candidate = list(lines)
+        else:
+            for cmd, cfg in itertools.izip(lines, config):
+                if cmd != cfg:
+                    candidate = list(lines)
+                    break
+
+    else:
+        for cmd in lines:
+            if cmd not in config:
+                candidate.append(cmd)
+
+    return candidate
+
+
 def main():
-    """ main entry point for module execution
-    """
 
     argument_spec = dict(
         lines=dict(aliases=['commands'], required=True, type='list'),
@@ -165,11 +180,12 @@ def main():
         match=dict(default='line', choices=['line', 'strict', 'exact']),
         replace=dict(default='line', choices=['line', 'block']),
         force=dict(default=False, type='bool'),
-        config=dict()
+        config=dict(),
+        transport=dict(default='cli', choices=['cli'])
     )
 
     module = get_module(argument_spec=argument_spec,
-                        supports_check_mode=True)
+                         supports_check_mode=True)
 
     lines = module.params['lines']
     parents = module.params['parents'] or list()
@@ -180,41 +196,52 @@ def main():
     match = module.params['match']
     replace = module.params['replace']
 
-    if not module.params['force']:
-        contents = get_config(module)
-        config = NetworkConfig(contents=contents, indent=3)
+    contents = get_config(module)
+    config = module.parse_config(contents)
 
-        candidate = NetworkConfig(indent=3)
-        candidate.add(lines, parents=parents)
+    if parents:
+        for parent in parents:
+            for item in config:
+                if item.text == parent:
+                    config = item
 
-        commands = candidate.difference(config, path=parents, match=match, replace=replace)
+        try:
+            children = [c.text for c in config.children]
+        except AttributeError:
+            children = [c.text for c in config]
+
     else:
-        commands = parents
-        commands.extend(lines)
+        children = [c.text for c in config if not c.parents]
 
     result = dict(changed=False)
 
-    if commands:
+    candidate = build_candidate(lines, parents, children, match)
+
+    if candidate:
+        if replace == 'line':
+            candidate[:0] = parents
+        else:
+            candidate = list(parents)
+            candidate.extend(lines)
+
         if before:
-            commands[:0] = before
+            candidate[:0] = before
 
         if after:
-            commands.extend(after)
+            candidate.extend(after)
 
         if not module.check_mode:
-            commands = [str(c).strip() for c in commands]
-            response = module.configure(commands)
+            response = module.configure(candidate)
             result['responses'] = response
         result['changed'] = True
 
-    result['updates'] = commands
-    module.exit_json(**result)
+    result['updates'] = candidate
+    return module.exit_json(**result)
 
 from ansible.module_utils.basic import *
-from ansible.module_utils.urls import *
 from ansible.module_utils.shell import *
 from ansible.module_utils.netcfg import *
-from ansible.module_utils.eos import *
+from ansible.module_utils.openswitch import *
 if __name__ == '__main__':
     main()
 

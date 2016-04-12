@@ -73,6 +73,13 @@ options:
     required: false
     default: "no"
     choices: [ "yes", "no" ]
+  allow_unauthenticated:
+    description:
+      - Ignore if packages cannot be authenticated. This is useful for bootstrapping environments that manage their own apt-key setup.
+    required: false
+    default: "no"
+    choices: [ "yes", "no" ]
+    version_added: "2.1"
   upgrade:
     description:
       - 'If yes or safe, performs an aptitude safe-upgrade.'
@@ -92,15 +99,24 @@ options:
   deb:
      description:
        - Path to a .deb package on the remote machine.
+       - If :// in the path, ansible will attempt to download deb before installing. (Version added 2.1)
      required: false
      version_added: "1.6"
   autoremove:
     description:
-     - If C(yes), remove unused dependency packages for all module states except I(build-dep).
+      - If C(yes), remove unused dependency packages for all module states except I(build-dep).
     required: false
     default: no
     choices: [ "yes", "no" ]
     aliases: [ 'autoclean']
+    version_added: "2.1"
+  only_upgrade:
+    description:
+      - Only install/upgrade a package it it is already installed.
+    required: false
+    default: false
+    version_added: "2.1"
+
 requirements: [ python-apt, aptitude ]
 author: "Matthew Williams (@mgwilliams)"
 notes:
@@ -144,6 +160,9 @@ EXAMPLES = '''
 
 # Install the build dependencies for package "foo"
 - apt: pkg=foo state=build-dep
+
+# Install a .deb package from the internet.
+- apt: deb=https://example.com/python-ppq_0.1-1_all.deb
 '''
 
 RETURN = '''
@@ -354,7 +373,8 @@ def expand_pkgspec_from_fnmatches(m, pkgspec, cache):
 def install(m, pkgspec, cache, upgrade=False, default_release=None,
             install_recommends=None, force=False,
             dpkg_options=expand_dpkg_options(DPKG_OPTIONS),
-            build_dep=False, autoremove=False):
+            build_dep=False, autoremove=False, only_upgrade=False,
+            allow_unauthenticated=False):
     pkg_list = []
     packages = ""
     pkgspec = expand_pkgspec_from_fnmatches(m, pkgspec, cache)
@@ -393,10 +413,15 @@ def install(m, pkgspec, cache, upgrade=False, default_release=None,
         else:
             autoremove = ''
 
-        if build_dep:
-            cmd = "%s -y %s %s %s build-dep %s" % (APT_GET_CMD, dpkg_options, force_yes, check_arg, packages)
+        if only_upgrade:
+            only_upgrade = '--only-upgrade'
         else:
-            cmd = "%s -y %s %s %s %s install %s" % (APT_GET_CMD, dpkg_options, force_yes, autoremove, check_arg, packages)
+            only_upgrade = ''
+
+        if build_dep:
+            cmd = "%s -y %s %s %s %s build-dep %s" % (APT_GET_CMD, dpkg_options, only_upgrade, force_yes, check_arg, packages)
+        else:
+            cmd = "%s -y %s %s %s %s %s install %s" % (APT_GET_CMD, dpkg_options, only_upgrade, force_yes, autoremove, check_arg, packages)
 
         if default_release:
             cmd += " -t '%s'" % (default_release,)
@@ -407,6 +432,9 @@ def install(m, pkgspec, cache, upgrade=False, default_release=None,
             cmd += " -o APT::Install-Recommends=yes"
         # install_recommends is None uses the OS default
 
+        if allow_unauthenticated:
+            cmd += " --allow-unauthenticated"
+
         rc, out, err = m.run_command(cmd)
         if rc:
             return (False, dict(msg="'%s' failed: %s" % (cmd, err), stdout=out, stderr=err))
@@ -415,7 +443,7 @@ def install(m, pkgspec, cache, upgrade=False, default_release=None,
     else:
         return (True, dict(changed=False))
 
-def install_deb(m, debs, cache, force, install_recommends, dpkg_options):
+def install_deb(m, debs, cache, force, install_recommends, allow_unauthenticated, dpkg_options):
     changed=False
     deps_to_install = []
     pkgs_to_install = []
@@ -555,6 +583,31 @@ def upgrade(m, mode="yes", force=False, default_release=None,
         m.exit_json(changed=False, msg=out, stdout=out, stderr=err)
     m.exit_json(changed=True, msg=out, stdout=out, stderr=err)
 
+def download(module, deb):
+    tempdir = os.path.dirname(__file__)
+    package = os.path.join(tempdir, str(deb.rsplit('/', 1)[1]))
+    # When downloading a deb, how much of the deb to download before
+    # saving to a tempfile (64k)
+    BUFSIZE = 65536
+
+    try:
+        rsp, info = fetch_url(module, deb)
+        f = open(package, 'w')
+        # Read 1kb at a time to save on ram
+        while True:
+            data = rsp.read(BUFSIZE)
+
+            if data == "":
+                break # End of file, break while loop
+
+            f.write(data)
+        f.close()
+        deb = package
+    except Exception, e:
+        module.fail_json(msg="Failure downloading %s, %s" % (deb, e))
+
+    return deb
+
 def main():
     module = AnsibleModule(
         argument_spec = dict(
@@ -569,7 +622,9 @@ def main():
             force = dict(default='no', type='bool'),
             upgrade = dict(choices=['no', 'yes', 'safe', 'full', 'dist']),
             dpkg_options = dict(default=DPKG_OPTIONS),
-            autoremove = dict(type='bool', default=False, aliases=['autoclean'])
+            autoremove = dict(type='bool', default=False, aliases=['autoclean']),
+            only_upgrade = dict(type='bool', default=False),
+            allow_unauthenticated = dict(default='no', aliases=['allow-unauthenticated'], type='bool'),
         ),
         mutually_exclusive = [['package', 'upgrade', 'deb']],
         required_one_of = [['package', 'upgrade', 'update_cache', 'deb']],
@@ -607,6 +662,7 @@ def main():
     updated_cache = False
     updated_cache_time = 0
     install_recommends = p['install_recommends']
+    allow_unauthenticated = p['allow_unauthenticated']
     dpkg_options = expand_dpkg_options(p['dpkg_options'])
     autoremove = p['autoremove']
 
@@ -650,7 +706,15 @@ def main():
                         updated_cache_time = int(time.mktime(mtimestamp.timetuple()))
 
             if cache_valid is not True:
-                cache.update()
+                for retry in xrange(3):
+                    try:
+                        cache.update()
+                        break
+                    except apt.cache.FetchFailedException:
+                        pass
+                else:
+                    #out of retries, pass on the exception
+                    raise
                 cache.open(progress=None)
                 updated_cache = True
                 updated_cache_time = int(time.mktime(now.timetuple()))
@@ -668,8 +732,11 @@ def main():
         if p['deb']:
             if p['state'] != 'present':
                 module.fail_json(msg="deb only supports state=present")
+            if '://' in p['deb']:
+                p['deb'] = download(module, p['deb'])
             install_deb(module, p['deb'], cache,
                         install_recommends=install_recommends,
+                        allow_unauthenticated=allow_unauthenticated,
                         force=force_yes, dpkg_options=p['dpkg_options'])
 
         packages = p['package']
@@ -691,7 +758,9 @@ def main():
                     default_release=p['default_release'],
                     install_recommends=install_recommends,
                     force=force_yes, dpkg_options=dpkg_options,
-                    build_dep=state_builddep, autoremove=autoremove)
+                    build_dep=state_builddep, autoremove=autoremove,
+                    only_upgrade=p['only_upgrade'],
+                    allow_unauthenticated=allow_unauthenticated)
             (success, retvals) = result
             retvals['cache_updated']=updated_cache
             retvals['cache_update_time']=updated_cache_time
@@ -709,6 +778,7 @@ def main():
 
 # import module snippets
 from ansible.module_utils.basic import *
+from ansible.module_utils.urls import *
 
 if __name__ == "__main__":
     main()

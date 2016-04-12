@@ -127,7 +127,7 @@ def main():
         owner             = dict(default=None),
         min_disk          = dict(type='int', default=0),
         min_ram           = dict(type='int', default=0),
-        is_public         = dict(default=False),
+        is_public         = dict(type='bool', default=False),
         filename          = dict(default=None),
         ramdisk           = dict(default=None),
         kernel            = dict(default=None),
@@ -188,4 +188,6 @@ def main():
 # this is magic, see lib/ansible/module_common.py
 from ansible.module_utils.basic import *
 from ansible.module_utils.openstack import *
-main()
+
+if __name__ == "__main__":
+    main()

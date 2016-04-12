@@ -263,10 +263,12 @@ EXAMPLES = '''
 
 '''
 
+MINIMUM_BOTO_VERSION = '2.28.0'
 WAIT_RETRY_SLEEP = 5  # how many seconds to wait between propagation status polls
 
 
 import time
+import distutils.version
 
 try:
     import boto
@@ -335,6 +337,21 @@ def commit(changes, retry_interval, wait, wait_timeout):
         raise TimeoutError()
     return result
 
+# Shamelessly copied over from https://git.io/vgmDG
+IGNORE_CODE = 'Throttling'
+MAX_RETRIES=5
+def invoke_with_throttling_retries(function_ref, *argv):
+    retries=0
+    while True:
+        try:
+            retval=function_ref(*argv)
+            return retval
+        except boto.exception.BotoServerError, e:
+            if e.code != IGNORE_CODE or retries==MAX_RETRIES:
+                raise e
+        time.sleep(5 * (2**retries))
+        retries += 1
+
 def main():
     argument_spec = ec2_argument_spec()
     argument_spec.update(dict(
@@ -365,6 +382,9 @@ def main():
 
     if not HAS_BOTO:
         module.fail_json(msg='boto required for this module')
+
+    if distutils.version.StrictVersion(boto.__version__) < distutils.version.StrictVersion(MINIMUM_BOTO_VERSION):
+        module.fail_json(msg='Found boto in version %s, but >= %s is required' % (boto.__version__, MINIMUM_BOTO_VERSION))
 
     command_in                      = module.params.get('command')
     zone_in                         = module.params.get('zone').lower()
@@ -507,7 +527,7 @@ def main():
         changes.add_change_record(command, wanted_rset)
 
     try:
-        result = commit(changes, retry_interval_in, wait_in, wait_timeout_in)
+        result = invoke_with_throttling_retries(commit, changes, retry_interval_in, wait_in, wait_timeout_in)
     except boto.route53.exception.DNSServerError, e:
         txt = e.body.split("<Message>")[1]
         txt = txt.split("</Message>")[0]

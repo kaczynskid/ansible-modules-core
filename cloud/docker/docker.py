@@ -223,6 +223,15 @@ options:
     description:
       - Pass a dict of environment variables to the container.
     default: null
+  env_file:
+    version_added: "2.1"
+    description:
+      - Pass in a path to a file with environment variable (FOO=BAR).
+        If a key value is present in both explicitly presented (i.e. as 'env')
+        and in the environment file, the explicit value will override.
+        Requires docker-py >= 1.4.0.
+    default: null
+    required: false
   dns:
     description:
       - List of custom DNS servers for the container.
@@ -383,10 +392,9 @@ author:
     - "Cove Schneider (@cove)"
     - "Joshua Conner (@joshuaconner)"
     - "Pavel Antonov (@softzilla)"
-    - "Ash Wilson (@smashwilson)"
     - "Thomas Steinbach (@ThomasSteinbach)"
     - "Philippe Jandot (@zfil)"
-    - "Daan Oosterveld (@dusdanig)
+    - "Daan Oosterveld (@dusdanig)"
 requirements:
     - "python >= 2.6"
     - "docker-py >= 0.3.0"
@@ -437,6 +445,7 @@ EXAMPLES = '''
 #   on the host.
 # - bind UDP port 9001 within the container to port 8081 on the host, only
 #   listening on localhost.
+# - specify 2 ip resolutions.
 # - set the environment variable SECRET_KEY to "ssssh".
 
 - name: application container
@@ -452,6 +461,9 @@ EXAMPLES = '''
     ports:
     - "8080:9000"
     - "127.0.0.1:8081:9001/udp"
+    extra_hosts:
+      host1: "192.168.0.1"
+      host2: "192.168.0.2"
     env:
         SECRET_KEY: ssssh
 
@@ -673,7 +685,8 @@ class DockerManager(object):
             'stop_timeout': ((0, 5, 0), '1.0'),
             'ulimits': ((1, 2, 0), '1.18'),
             # Clientside only
-            'insecure_registry': ((0, 5, 0), '0.0')
+            'insecure_registry': ((0, 5, 0), '0.0'),
+            'env_file': ((1, 4, 0), '0.0')
             }
 
     def __init__(self, module):
@@ -724,7 +737,9 @@ class DockerManager(object):
         if self.module.params.get('links'):
             self.links = self.get_links(self.module.params.get('links'))
 
-        self.env = self.module.params.get('env', None)
+        env = self.module.params.get('env', None)
+        env_file = self.module.params.get('env_file', None)
+        self.environment = self.get_environment(env, env_file)
 
         self.ulimits = None
         if self.module.params.get('ulimits'):
@@ -862,6 +877,25 @@ class DockerManager(object):
                     self._cap_ver_req[capability][1],
                     '.'.join(map(str, self.docker_py_versioninfo)),
                     api_version))
+
+    def get_environment(self, env, env_file):
+        """
+        If environment files are combined with explicit environment variables, the explicit environment variables will override the key from the env file.
+        """
+        final_env = {}
+
+        if env_file:
+            self.ensure_capability('env_file')
+            parsed_env_file = docker.utils.parse_env_file(env_file)
+
+            for name, value in parsed_env_file.iteritems():
+                final_env[name] = str(value)
+
+        if env:
+            for name, value in env.iteritems():
+                final_env[name] = str(value)
+
+        return final_env
 
     def get_links(self, links):
         """
@@ -1238,8 +1272,8 @@ class DockerManager(object):
                 name, value = image_env.split('=', 1)
                 expected_env[name] = value
 
-            if self.env:
-                for name, value in self.env.iteritems():
+            if self.environment:
+                for name, value in self.environment.iteritems():
                     expected_env[name] = str(value)
 
             actual_env = {}
@@ -1512,10 +1546,17 @@ class DockerManager(object):
 
                 image_matches = running_image in repo_tags
 
-                command_matches = command == details['Config']['Cmd']
-                entrypoint_matches = (
-                    entrypoint == details['Config']['Entrypoint']
-                )
+                if command == None:
+                    command_matches = True
+                else:
+                    command_matches = (command == details['Config']['Cmd'])
+
+                if entrypoint == None:
+                    entrypoint_matches = True
+                else:
+                    entrypoint_matches = (
+                        entrypoint == details['Config']['Entrypoint']
+                    )
 
                 matches = (image_matches and command_matches and
                            entrypoint_matches)
@@ -1583,7 +1624,7 @@ class DockerManager(object):
                   'command':      self.module.params.get('command'),
                   'ports':        self.exposed_ports,
                   'volumes':      self.volumes,
-                  'environment':  self.env,
+                  'environment':  self.environment,
                   'labels':       self.module.params.get('labels'),
                   'hostname':     self.module.params.get('hostname'),
                   'domainname':   self.module.params.get('domainname'),
@@ -1801,7 +1842,7 @@ def absent(manager, containers, count, name):
 def main():
     module = AnsibleModule(
         argument_spec = dict(
-            count           = dict(default=1),
+            count           = dict(default=1, type='int'),
             image           = dict(required=True),
             pull            = dict(required=False, default='missing', choices=['missing', 'always']),
             entrypoint      = dict(required=False, default=None, type='str'),
@@ -1818,19 +1859,20 @@ def main():
             cpu_shares      = dict(default=0, type='int'),
             docker_url      = dict(),
             use_tls         = dict(default=None, choices=['no', 'encrypt', 'verify']),
-            tls_client_cert = dict(required=False, default=None, type='str'),
-            tls_client_key  = dict(required=False, default=None, type='str'),
-            tls_ca_cert     = dict(required=False, default=None, type='str'),
+            tls_client_cert = dict(required=False, default=None, type='path'),
+            tls_client_key  = dict(required=False, default=None, type='path'),
+            tls_ca_cert     = dict(required=False, default=None, type='path'),
             tls_hostname    = dict(required=False, type='str', default=None),
             docker_api_version = dict(required=False, default=DEFAULT_DOCKER_API_VERSION, type='str'),
             docker_user     = dict(default=None),
             username        = dict(default=None),
-            password        = dict(),
+            password        = dict(no_log=True),
             email           = dict(),
             registry        = dict(),
             hostname        = dict(default=None),
             domainname      = dict(default=None),
             env             = dict(type='dict'),
+            env_file        = dict(default=None),
             dns             = dict(),
             detach          = dict(default=True, type='bool'),
             state           = dict(default='started', choices=['present', 'started', 'reloaded', 'restarted', 'stopped', 'killed', 'absent', 'running']),
@@ -1867,7 +1909,7 @@ def main():
 
     try:
         manager = DockerManager(module)
-        count = int(module.params.get('count'))
+        count = module.params.get('count')
         name = module.params.get('name')
         pull = module.params.get('pull')
 

@@ -36,8 +36,7 @@ options:
         file with config or a template that will be merged during
         runtime.  By default the task will search for the source
         file in role or playbook root folder in templates directory.
-    required: false
-    default: null
+    required: true
   force:
     description:
       - The force argument instructs the module to not consider the
@@ -46,7 +45,16 @@ options:
         without first checking if already configured.
     required: false
     default: false
-    choices: BOOLEANS
+    choices: ['yes', 'no']
+  include_defaults:
+    description:
+      - By default when the M(eos_template) connects to the remote
+        device to retrieve the configuration it will issue the `show
+        running-config` command.  If this option is set to True then
+        the issued command will be `show running-config all`
+    required: false
+    default: false
+    choices: ['yes', 'no']
   backup:
     description:
       - When this argument is configured true, the module will backup
@@ -55,7 +63,7 @@ options:
         the root of the playbook directory.
     required: false
     default: false
-    choices: BOOLEANS
+    choices: ['yes', 'no']
   replace:
     description:
       - This argument will cause the provided configuration to be replaced
@@ -65,7 +73,7 @@ options:
         is eapi.
     required: false
     default: false
-    choice: BOOLEANS
+    choices: ['yes', 'no']
   config:
     description:
       - The module, by default, will connect to the remote device and
@@ -109,44 +117,44 @@ responses:
   sample: ['...', '...']
 """
 
-def compare(this, other):
-    parents = [item.text for item in this.parents]
-    for entry in other:
-        if this == entry:
-            return None
-    return this
-
-def expand(obj, queue):
-    block = [item.raw for item in obj.parents]
-    block.append(obj.raw)
-
-    current_level = queue
-    for b in block:
-        if b not in current_level:
-            current_level[b] = collections.OrderedDict()
-        current_level = current_level[b]
-    for c in obj.children:
-        if c.raw not in current_level:
-            current_level[c.raw] = collections.OrderedDict()
-
-def flatten(data, obj):
-    for k, v in data.items():
-        obj.append(k)
-        flatten(v, obj)
-    return obj
+import re
 
 def get_config(module):
-    config = module.params['config'] or dict()
+    config = module.params.get('config')
     if not config and not module.params['force']:
         config = module.config
     return config
+
+def filter_exit(commands):
+    # Filter out configuration mode commands followed immediately by an
+    # exit command indented by one level only, e.g.
+    #     - route-map map01 permit 10
+    #     -    exit
+    #
+    # Build a temporary list as we filter, then copy the temp list
+    # back onto the commands list.
+    temp = []
+    ind_prev = 999
+    count = 0
+    for c in commands:
+        ind_this = c.count('   ')
+        if re.search(r"^\s*exit$", c) and ind_this == ind_prev + 1:
+            temp.pop()
+            count -= 1
+            if count != 0:
+                ind_prev = temp[-1].count('   ')
+            continue
+        temp.append(c)
+        ind_prev = ind_this
+        count += 1
+    return temp
 
 def main():
     """ main entry point for module execution
     """
 
     argument_spec = dict(
-        src=dict(),
+        src=dict(required=True),
         force=dict(default=False, type='bool'),
         include_defaults=dict(default=False, type='bool'),
         backup=dict(default=False, type='bool'),
@@ -162,44 +170,38 @@ def main():
 
     replace = module.params['replace']
 
+    commands = list()
+    running = None
+
     result = dict(changed=False)
 
-    candidate = module.parse_config(module.params['src'])
+    candidate = NetworkConfig(contents=module.params['src'], indent=3)
 
-    contents = get_config(module)
-    result['_backup'] = module.config
+    if replace:
+        if module.params['transport'] == 'cli':
+            module.fail_json(msg='config replace is only supported over eapi')
+        commands = str(candidate).split('\n')
+    else:
+        contents = get_config(module)
+        if contents:
+            running = NetworkConfig(contents=contents, indent=3)
+            result['_backup'] = contents
 
-    config = module.parse_config(contents)
-
-    commands = collections.OrderedDict()
-    toplevel = [c.text for c in config]
-
-    for line in candidate:
-        if line.text in ['!', '']:
-            continue
-
-        if not line.parents:
-            if line.text not in toplevel:
-                expand(line, commands)
+        if not module.params['force']:
+            commands = candidate.difference((running or list()))
         else:
-            item = compare(line, config)
-            if item:
-                expand(item, commands)
-
-    commands = flatten(commands, list())
+            commands = str(candidate).split('\n')
 
     if commands:
+        commands = filter_exit(commands)
         if not module.check_mode:
             commands = [str(c).strip() for c in commands]
-            if replace:
-                response = module.config_replace(commands)
-            else:
-                response = module.configure(commands)
+            response = module.configure(commands, replace=replace)
             result['responses'] = response
         result['changed'] = True
 
     result['updates'] = commands
-    return module.exit_json(**result)
+    module.exit_json(**result)
 
 from ansible.module_utils.basic import *
 from ansible.module_utils.urls import *
@@ -208,4 +210,3 @@ from ansible.module_utils.netcfg import *
 from ansible.module_utils.eos import *
 if __name__ == '__main__':
     main()
-
