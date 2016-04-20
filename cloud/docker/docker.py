@@ -585,13 +585,13 @@ def get_split_image_tag(image):
     else:
         registry, resource = None, image
 
-    # now we can determine if image has a tag
-    if ':' in resource:
-        resource, tag = resource.split(':', 1)
-        if registry:
-            resource = '/'.join((registry, resource))
-        if tag == "":
-            tag = "latest"
+    # now we can determine if image has a tag or a digest
+    for s in ['@',':']:
+        if s in resource:
+            resource, tag = resource.split(s, 1)
+            if registry:
+                resource = '/'.join((registry, resource))
+            break
     else:
         tag = "latest"
         resource = image
@@ -695,7 +695,7 @@ class DockerManager(object):
         self.binds = None
         self.volumes = None
         if self.module.params.get('volumes'):
-            self.binds = {}
+            self.binds = []
             self.volumes = []
             vols = self.module.params.get('volumes')
             for vol in vols:
@@ -713,7 +713,7 @@ class DockerManager(object):
                             self.module.fail_json(msg='invalid bind mode ' + parts[2])
                         else:
                             mode = parts[2]
-                    self.binds[parts[0]] = {'bind': parts[1], 'mode': mode }
+                    self.binds.append((parts[0], {'bind': parts[1], 'mode': mode}))
                 else:
                     self.module.fail_json(msg='volumes support 1 to 3 arguments')
 
@@ -1369,7 +1369,7 @@ class DockerManager(object):
 
             expected_binds = set()
             if self.binds:
-                for host_path, config in self.binds.iteritems():
+                for host_path, config in self.binds:
                     if isinstance(config, dict):
                         container_path = config['bind']
                         mode = config['mode']

@@ -93,7 +93,7 @@ options:
         without first checking if already configured.
     required: false
     default: false
-    choices: BOOLEANS
+    choices: [ "true", "false" ]
   config:
     description:
       - The module, by default, will connect to the remote device and
@@ -119,7 +119,7 @@ EXAMPLES = """
     parents: ['interface GigabitEthernet0/0/0/0']
 
 - iosxr_config:
-    commands: "{{lookup('file', 'datcenter1.txt'}}"
+    commands: "{{lookup('file', 'datcenter1.txt')}}"
     parents: ['ipv4 access-list test']
     before: ['no ip access-listv4 test']
     replace: block
@@ -211,4 +211,3 @@ from ansible.module_utils.netcfg import *
 from ansible.module_utils.iosxr import *
 if __name__ == '__main__':
     main()
-

@@ -29,6 +29,13 @@ options:
      description:
         - name of the module to enable/disable
      required: true
+   force:
+     description:
+        - force disabling of default modules and override Debian warnings
+     required: false
+     choices: ['yes', 'no']
+     default: no
+     version_added: "2.1"
    state:
      description:
         - indicate the desired state of the resource
@@ -50,9 +57,13 @@ import re
 
 def _disable_module(module):
     name = module.params['name']
+    force = module.params['force']
     a2dismod_binary = module.get_bin_path("a2dismod")
     if a2dismod_binary is None:
         module.fail_json(msg="a2dismod not found.  Perhaps this system does not use a2dismod to manage apache")
+
+    if force:
+        a2dismod_binary += ' -f'
 
     result, stdout, stderr = module.run_command("%s %s" % (a2dismod_binary, name))
 
@@ -82,6 +93,7 @@ def main():
     module = AnsibleModule(
         argument_spec = dict(
             name  = dict(required=True),
+            force = dict(required=False, type='bool', default=False),
             state = dict(default='present', choices=['absent', 'present'])
         ),
     )
